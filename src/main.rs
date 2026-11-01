@@ -2,14 +2,14 @@ mod bar;
 mod cloudflare;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
 use tokio::task::JoinSet;
 
-use bar::SpeedBar;
+use bar::{SpeedBar, Spinner};
 
 /// Measure ping, download and upload speed against Cloudflare.
 #[derive(Parser, Debug)]
@@ -31,12 +31,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let client = cloudflare::client()?;
 
-    let samples = cloudflare::ping(&client, args.pings).await?;
-    let ms = |d: &Duration| d.as_secs_f64() * 1000.0;
-    let min = samples.iter().min().map(ms).unwrap_or(0.0);
-    let max = samples.iter().max().map(ms).unwrap_or(0.0);
-    let mean = samples.iter().map(ms).sum::<f64>() / samples.len().max(1) as f64;
-    println!("{:<9} min {min:.1} ms   mean {mean:.1} ms   max {max:.1} ms   ({} samples)", "Ping", samples.len());
+    run_ping(&client, args.pings).await?;
 
     let duration = Duration::from_secs(args.duration);
     // Download streams are torn down at the deadline; every byte counted has arrived.
@@ -53,17 +48,46 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Runs the latency phase behind a spinner that shows immediately, then prints min/mean/max.
+async fn run_ping(client: &reqwest::Client, count: usize) -> Result<()> {
+    let done = Arc::new(AtomicUsize::new(0));
+    let mut spinner = Spinner::new("Ping");
+    spinner.tick(&format!("0/{count}"));
+
+    let mut task = tokio::spawn(cloudflare::ping(client.clone(), count, done.clone()));
+    let mut tick = tokio::time::interval(Duration::from_millis(80));
+    let samples = loop {
+        tokio::select! {
+            _ = tick.tick() => spinner.tick(&format!("{}/{count}", done.load(Ordering::Relaxed))),
+            res = &mut task => break res?,
+        }
+    };
+    spinner.clear();
+    let samples = samples?;
+
+    let ms = |d: &Duration| d.as_secs_f64() * 1000.0;
+    let min = samples.iter().min().map_or(0.0, ms);
+    let max = samples.iter().max().map_or(0.0, ms);
+    let mean = samples.iter().map(ms).sum::<f64>() / samples.len().max(1) as f64;
+    println!(
+        "{:<9} min {min:.1} ms   mean {mean:.1} ms   max {max:.1} ms   ({} samples)",
+        "Ping",
+        samples.len()
+    );
+    Ok(())
+}
+
 /// Runs a throughput phase: spawns the workers, drives the live bar with a 1 s sliding-window
 /// speed until the deadline, then freezes the bar at the overall average. With `drain` the
 /// workers are allowed to finish their final request (bounded) before the average is taken.
 async fn run_phase<F>(label: &'static str, duration: Duration, drain: bool, spawn: F) -> Result<()>
 where
-    F: FnOnce(Instant, Arc<AtomicU64>) -> JoinSet<Result<()>>,
+    F: FnOnce(Instant, &Arc<AtomicU64>) -> JoinSet<Result<()>>,
 {
     let counter = Arc::new(AtomicU64::new(0));
     let start = Instant::now();
     let deadline = start + duration;
-    let mut set = spawn(deadline, counter.clone());
+    let mut set = spawn(deadline, &counter);
     let mut bar = SpeedBar::new(label);
     bar.update(0.0);
 

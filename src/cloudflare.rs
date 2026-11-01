@@ -1,7 +1,7 @@
 //! Latency and throughput measurement against Cloudflare's public speed-test endpoints.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -34,9 +34,12 @@ pub fn client() -> Result<Client> {
 }
 
 /// One warm-up request (discarded) then `count` timed zero-byte GETs on the reused connection.
-pub async fn ping(client: &Client, count: usize) -> Result<Vec<Duration>> {
+/// `done` is incremented after each sample so a caller can show progress.
+pub async fn ping(client: Client, count: usize, done: Arc<AtomicUsize>) -> Result<Vec<Duration>> {
     let probe = || client.get(DOWN_URL).query(&[("bytes", "0")]).send();
-    probe().await.context("warm-up request to speed.cloudflare.com")?;
+    probe()
+        .await
+        .context("warm-up request to speed.cloudflare.com")?;
 
     let mut samples = Vec::with_capacity(count);
     for _ in 0..count {
@@ -44,13 +47,19 @@ pub async fn ping(client: &Client, count: usize) -> Result<Vec<Duration>> {
         let resp = probe().await.context("ping request")?;
         resp.bytes().await.context("ping response body")?;
         samples.push(start.elapsed());
+        done.fetch_add(1, Ordering::Relaxed);
     }
     Ok(samples)
 }
 
 /// Spawns `connections` download loops that run until `deadline`, adding received bytes to `counter`.
 /// Tasks are not aborted here; the caller aborts the set at the deadline.
-pub fn download(client: &Client, connections: usize, deadline: Instant, counter: Arc<AtomicU64>) -> JoinSet<Result<()>> {
+pub fn download(
+    client: &Client,
+    connections: usize,
+    deadline: Instant,
+    counter: &Arc<AtomicU64>,
+) -> JoinSet<Result<()>> {
     let mut set = JoinSet::new();
     for _ in 0..connections {
         let client = client.clone();
@@ -84,7 +93,12 @@ pub fn download(client: &Client, connections: usize, deadline: Instant, counter:
 /// handed to the HTTP stack, and ends its body once the deadline passes so the request finishes cleanly.
 ///
 /// The counter runs slightly ahead of the wire (socket buffering); fine for a speed estimate.
-pub fn upload(client: &Client, connections: usize, deadline: Instant, counter: Arc<AtomicU64>) -> JoinSet<Result<()>> {
+pub fn upload(
+    client: &Client,
+    connections: usize,
+    deadline: Instant,
+    counter: &Arc<AtomicU64>,
+) -> JoinSet<Result<()>> {
     let mut set = JoinSet::new();
     let zeros = Bytes::from(vec![0u8; UP_CHUNK]);
     for _ in 0..connections {
@@ -103,7 +117,10 @@ pub fn upload(client: &Client, connections: usize, deadline: Instant, counter: A
                             return None;
                         }
                         counter.fetch_add(zeros.len() as u64, Ordering::Relaxed);
-                        Some((Ok::<Bytes, std::io::Error>(zeros.clone()), sent + zeros.len() as u64))
+                        Some((
+                            Ok::<Bytes, std::io::Error>(zeros.clone()),
+                            sent + zeros.len() as u64,
+                        ))
                     }
                 });
                 client
@@ -128,7 +145,10 @@ mod tests {
     fn user_agent_is_a_single_line_browser_string() {
         let ua = super::USER_AGENT;
         assert!(ua.starts_with("Mozilla/5.0 ("), "{ua}");
-        assert!(ua.contains("AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"), "{ua}");
+        assert!(
+            ua.contains("AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"),
+            "{ua}"
+        );
         assert!(!ua.contains('\n') && !ua.contains("  "), "{ua}");
     }
 }
