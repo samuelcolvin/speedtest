@@ -88,8 +88,20 @@ impl SpeedBar {
             s.push_str(&CELL.repeat(lit));
             s.push_str(&"▱".repeat(WIDTH - lit));
         }
-        let _ = write!(s, "  {mbps:>7.1} Mbps  (0–{})", self.max_mbps);
+        let _ = write!(s, "  {:>7} Mbps  (0–{})", format_mbps(mbps), self.max_mbps);
         s
+    }
+}
+
+/// More decimals as the speed drops, so slow links still show a meaningful figure:
+/// one place from 10 Mbps up, two below 10, three below 1.
+fn format_mbps(mbps: f64) -> String {
+    if mbps >= 10.0 {
+        format!("{mbps:.1}")
+    } else if mbps >= 1.0 {
+        format!("{mbps:.2}")
+    } else {
+        format!("{mbps:.3}")
     }
 }
 
@@ -216,6 +228,16 @@ mod tests {
         assert_eq!(line.matches(CELL).count(), 41);
         assert_eq!(line.matches("▱").count(), 9);
         assert!(line.ends_with("412.5 Mbps  (0–500)"), "{line}");
+    }
+
+    #[test]
+    fn decimals_increase_as_speed_drops() {
+        assert_eq!(format_mbps(412.53), "412.5");
+        assert_eq!(format_mbps(10.0), "10.0");
+        assert_eq!(format_mbps(9.876), "9.88");
+        assert_eq!(format_mbps(1.0), "1.00");
+        assert_eq!(format_mbps(0.1234), "0.123");
+        assert_eq!(format_mbps(0.0), "0.000");
     }
 
     #[test]
