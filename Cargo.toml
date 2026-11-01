@@ -1,0 +1,12 @@
+[package]
+name = "speedtest"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
