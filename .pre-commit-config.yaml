@@ -26,7 +26,13 @@ repos:
         pass_filenames: false
       - id: lint
         name: Lint
-        entry: make lint
+        entry: make check
         types: [rust]
+        language: system
+        pass_filenames: false
+      - id: format-md
+        name: Format Markdown
+        entry: make format-md
+        types: [markdown]
         language: system
         pass_filenames: false
