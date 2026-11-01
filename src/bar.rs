@@ -12,6 +12,8 @@ const LIT: &str = "\x1b[97m";
 const GRAY: &str = "\x1b[90m";
 const RESET: &str = "\x1b[0m";
 const CLEAR_LINE: &str = "\r\x1b[2K";
+const HIDE_CURSOR: &str = "\x1b[?25l";
+pub const SHOW_CURSOR: &str = "\x1b[?25h";
 
 /// Nice maxima for the scale, in Mbps. The bar starts at the first entry and only grows.
 const SCALES: &[u64] = &[
@@ -98,6 +100,34 @@ fn lit_cells(fraction: f64) -> usize {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let lit = cells.clamp(0.0, WIDTH as f64) as usize;
     lit
+}
+
+/// Hides the terminal cursor for as long as the guard lives, so it doesn't blink at the end
+/// of the live-updating lines. Does nothing when stdout is not a terminal.
+pub struct HiddenCursor {
+    tty: bool,
+}
+
+impl HiddenCursor {
+    pub fn new() -> Self {
+        let tty = stdout_is_tty();
+        if tty {
+            let mut out = std::io::stdout().lock();
+            let _ = write!(out, "{HIDE_CURSOR}");
+            let _ = out.flush();
+        }
+        Self { tty }
+    }
+}
+
+impl Drop for HiddenCursor {
+    fn drop(&mut self) {
+        if self.tty {
+            let mut out = std::io::stdout().lock();
+            let _ = write!(out, "{SHOW_CURSOR}");
+            let _ = out.flush();
+        }
+    }
 }
 
 /// An animated spinner shown while a phase has nothing else to display yet.

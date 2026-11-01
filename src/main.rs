@@ -2,6 +2,7 @@ mod bar;
 mod cloudflare;
 mod mlab;
 
+use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -11,7 +12,7 @@ use clap::Parser;
 use reqwest::Client;
 use tokio::task::JoinSet;
 
-use bar::{SpeedBar, Spinner};
+use bar::{HiddenCursor, SpeedBar, Spinner};
 
 /// Measure ping, download and upload speed.
 #[derive(Parser, Debug)]
@@ -104,6 +105,19 @@ impl Backend {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    // Restored when this guard drops, which covers normal exit and errors; Ctrl-C bypasses
+    // drop, so a signal handler restores it explicitly before exiting.
+    let _cursor = HiddenCursor::new();
+    tokio::spawn(async {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            if std::io::stdout().is_terminal() {
+                print!("{}", bar::SHOW_CURSOR);
+                let _ = std::io::stdout().flush();
+            }
+            std::process::exit(130);
+        }
+    });
+
     let client = Client::builder()
         .user_agent(USER_AGENT)
         .timeout(Duration::from_secs(60))
