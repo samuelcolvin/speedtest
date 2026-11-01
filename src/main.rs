@@ -55,8 +55,8 @@ impl Backend {
 
     fn describe(&self) -> String {
         match self {
-            Self::Mlab(s) => format!("{}, {}  ({})", s.city, s.country, s.machine),
-            Self::Cloudflare(s) => format!("Cloudflare {}  (speed.cloudflare.com)", s.colo),
+            Self::Mlab(s) => format!("{}, {}", s.city, s.country),
+            Self::Cloudflare(s) => format!("Cloudflare {}", s.colo),
         }
     }
 

@@ -37,7 +37,6 @@ struct LocateResponse {
 
 #[derive(Deserialize)]
 struct LocateResult {
-    machine: String,
     #[serde(default)]
     location: Location,
     urls: HashMap<String, String>,
@@ -51,7 +50,6 @@ struct Location {
 
 /// The nearest NDT7 server as chosen by M-Lab's locate service.
 pub struct Server {
-    pub machine: String,
     pub city: String,
     pub country: String,
     /// Plain HTTPS URL on the server, used for latency round trips.
@@ -88,7 +86,6 @@ pub async fn locate(client: &Client) -> Result<Server> {
         .and_then(|u| u.host_str().map(str::to_owned))
         .context("download url has no host")?;
     Ok(Server {
-        machine: result.machine,
         city: result.location.city,
         country: result.location.country,
         ping_url: format!("https://{host}/"),
