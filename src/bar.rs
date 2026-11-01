@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::io::{IsTerminal, Write as _};
 
 const CELL: &str = "▰";
-const WIDTH: usize = 40;
+const WIDTH: usize = 50;
 const LIT: &str = "\x1b[97m";
 const GRAY: &str = "\x1b[90m";
 const RESET: &str = "\x1b[0m";
@@ -213,8 +213,8 @@ mod tests {
         let mut b = bar();
         b.grow(412.5);
         let line = b.render(412.5);
-        assert_eq!(line.matches(CELL).count(), 33);
-        assert_eq!(line.matches("▱").count(), 7);
+        assert_eq!(line.matches(CELL).count(), 41);
+        assert_eq!(line.matches("▱").count(), 9);
         assert!(line.ends_with("412.5 Mbps  (0–500)"), "{line}");
     }
 

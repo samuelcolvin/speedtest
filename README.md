@@ -4,8 +4,8 @@ A terminal speed test: download, upload and ping, with a live bar for each throu
 
 ```
 Server    Dallas, US
-Download  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱    412.5 Mbps  (0–500)
-Upload    ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱     47.3 Mbps  (0–100)
+Download  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱    412.5 Mbps  (0–500)
+Upload    ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱     47.3 Mbps  (0–100)
 Ping      min 12.3 ms   mean 14.1 ms   max 19.8 ms   (10 samples)
 ```
 
