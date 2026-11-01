@@ -4,7 +4,8 @@ mod mlab;
 
 use std::io::{IsTerminal, Write};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -12,7 +13,7 @@ use clap::Parser;
 use reqwest::Client;
 use tokio::task::JoinSet;
 
-use bar::{HiddenCursor, SpeedBar, Spinner};
+use bar::{HiddenCursor, LiveLine, SpeedBar, Spinner};
 
 /// Measure ping, download and upload speed.
 #[derive(Parser, Debug)]
@@ -36,9 +37,12 @@ struct Args {
 }
 
 /// Cloudflare's own speed test runs in the browser, so present the same kind of client it
-/// expects; a bespoke user agent is more likely to be rate-limited or blocked. M-Lab doesn't mind.
-const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
-                          (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
+/// expects; a bespoke user agent is more likely to be rate-limited or blocked.
+const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+                                  (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
+
+/// M-Lab asks clients to identify themselves, so there we say who we are.
+const HONEST_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 enum Backend {
     Mlab(mlab::Server),
@@ -118,8 +122,13 @@ async fn main() -> Result<()> {
         }
     });
 
+    let user_agent = if args.cloudflare {
+        BROWSER_USER_AGENT
+    } else {
+        HONEST_USER_AGENT
+    };
     let client = Client::builder()
-        .user_agent(USER_AGENT)
+        .user_agent(user_agent)
         .timeout(Duration::from_secs(60))
         .build()
         .context("building HTTP client")?;
@@ -170,58 +179,77 @@ const SLOW_PING_CUTOFF: usize = 5;
 const SLOW_PING_BUDGET: Duration = Duration::from_secs(4);
 
 /// One warm-up request (discarded) then up to `count` timed GETs on the reused connection.
-/// `done` is incremented after each sample so the spinner can show progress.
+/// Each sample is pushed to `samples` as it completes so the caller can show running stats.
 async fn http_ping(
     client: Client,
     url: String,
     count: usize,
-    done: Arc<AtomicUsize>,
-) -> Result<Vec<Duration>> {
+    samples: Arc<Mutex<Vec<Duration>>>,
+) -> Result<()> {
     let probe = || client.get(&url).send();
     probe().await.context("warm-up request")?;
 
     let sampling_started = Instant::now();
-    let mut samples = Vec::with_capacity(count);
     for _ in 0..count {
         let start = Instant::now();
         let resp = probe().await.context("ping request")?;
         resp.bytes().await.context("ping response body")?;
-        samples.push(start.elapsed());
-        done.fetch_add(1, Ordering::Relaxed);
-        if samples.len() == SLOW_PING_CUTOFF && sampling_started.elapsed() > SLOW_PING_BUDGET {
+        let taken = {
+            let mut samples = samples.lock().expect("ping samples lock");
+            samples.push(start.elapsed());
+            samples.len()
+        };
+        if taken == SLOW_PING_CUTOFF && sampling_started.elapsed() > SLOW_PING_BUDGET {
             break;
         }
     }
-    Ok(samples)
+    Ok(())
 }
 
-/// Runs the latency phase behind a spinner that shows immediately, then prints min/mean/max.
-async fn run_ping(client: &Client, url: String, count: usize) -> Result<()> {
-    let done = Arc::new(AtomicUsize::new(0));
-    let mut spinner = Spinner::new("Ping");
-    spinner.tick("0");
-
-    let mut task = tokio::spawn(http_ping(client.clone(), url, count, done.clone()));
-    let mut tick = tokio::time::interval(Duration::from_millis(80));
-    let samples = loop {
-        tokio::select! {
-            _ = tick.tick() => spinner.tick(&done.load(Ordering::Relaxed).to_string()),
-            res = &mut task => break res?,
-        }
-    };
-    spinner.clear();
-    let samples = samples?;
-
+/// The Ping result line for the samples so far.
+fn ping_line(samples: &[Duration]) -> String {
     let ms = |d: &Duration| d.as_secs_f64() * 1000.0;
     let min = samples.iter().min().map_or(0.0, ms);
     let max = samples.iter().max().map_or(0.0, ms);
     let mean = samples.iter().map(ms).sum::<f64>() / samples.len().max(1) as f64;
-    println!(
-        "{:<9} min {min:.1} ms   mean {mean:.1} ms   max {max:.1} ms   ({} samples)",
+    let plural = if samples.len() == 1 { "" } else { "s" };
+    format!(
+        "{:<9} min {min:.1} ms   mean {mean:.1} ms   max {max:.1} ms   ({} sample{plural})",
         "Ping",
         samples.len()
-    );
-    Ok(())
+    )
+}
+
+/// Runs the latency phase: a spinner until the first sample, then the min/mean/max line
+/// redrawn as each further sample arrives.
+async fn run_ping(client: &Client, url: String, count: usize) -> Result<()> {
+    let samples = Arc::new(Mutex::new(Vec::with_capacity(count)));
+    let mut spinner = Spinner::new("Ping");
+    let line = LiveLine::new();
+    spinner.tick("");
+
+    let mut task = tokio::spawn(http_ping(client.clone(), url, count, samples.clone()));
+    let mut tick = tokio::time::interval(Duration::from_millis(80));
+    let result = loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                let samples = samples.lock().expect("ping samples lock");
+                if samples.is_empty() {
+                    spinner.tick("");
+                } else {
+                    line.update(&ping_line(&samples));
+                }
+            }
+            res = &mut task => break res?,
+        }
+    };
+    let samples = samples.lock().expect("ping samples lock");
+    if samples.is_empty() {
+        spinner.clear();
+        return result;
+    }
+    line.finish(&ping_line(&samples));
+    result
 }
 
 /// Runs a throughput phase: spawns the workers, drives the live bar with a 1 s sliding-window
@@ -280,4 +308,27 @@ where
 
 fn mbps(bytes: u64, secs: f64) -> f64 {
     bytes as f64 * 8.0 / secs / 1_000_000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ping_line_counts_samples() {
+        let one = [Duration::from_millis(12)];
+        assert_eq!(
+            ping_line(&one),
+            "Ping      min 12.0 ms   mean 12.0 ms   max 12.0 ms   (1 sample)"
+        );
+        let three = [
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+            Duration::from_millis(30),
+        ];
+        assert_eq!(
+            ping_line(&three),
+            "Ping      min 10.0 ms   mean 20.0 ms   max 30.0 ms   (3 samples)"
+        );
+    }
 }

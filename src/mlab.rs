@@ -59,9 +59,14 @@ pub struct Server {
 }
 
 /// Ask M-Lab for the nearest servers and take the first, which it ranks closest.
+/// The locate API asks clients to name themselves in the query string.
 pub async fn locate(client: &Client) -> Result<Server> {
     let resp: LocateResponse = client
         .get(LOCATE_URL)
+        .query(&[
+            ("client_name", env!("CARGO_PKG_NAME")),
+            ("client_version", env!("CARGO_PKG_VERSION")),
+        ])
         .send()
         .await
         .context("contacting locate.measurementlab.net")?

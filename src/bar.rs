@@ -142,6 +142,38 @@ impl Drop for HiddenCursor {
     }
 }
 
+/// A line of text redrawn in place, for results that refine as they arrive.
+pub struct LiveLine {
+    tty: bool,
+}
+
+impl LiveLine {
+    pub fn new() -> Self {
+        Self {
+            tty: stdout_is_tty(),
+        }
+    }
+
+    /// Replace the current line. No-op when stdout is not a terminal.
+    pub fn update(&self, text: &str) {
+        if self.tty {
+            let mut out = std::io::stdout().lock();
+            let _ = write!(out, "{CLEAR_LINE}{text}");
+            let _ = out.flush();
+        }
+    }
+
+    /// Replace the current line for the last time and move to the next.
+    pub fn finish(&self, text: &str) {
+        let mut out = std::io::stdout().lock();
+        if self.tty {
+            let _ = write!(out, "{CLEAR_LINE}");
+        }
+        let _ = writeln!(out, "{text}");
+        let _ = out.flush();
+    }
+}
+
 /// An animated spinner shown while a phase has nothing else to display yet.
 pub struct Spinner {
     label: &'static str,
@@ -165,10 +197,15 @@ impl Spinner {
         }
         let glyph = SPINNER_FRAMES[self.frame % SPINNER_FRAMES.len()];
         self.frame += 1;
+        let detail = if detail.is_empty() {
+            String::new()
+        } else {
+            format!(" {detail}")
+        };
         let mut out = std::io::stdout().lock();
         let _ = write!(
             out,
-            "{CLEAR_LINE}{:<9} {GRAY}{glyph} {detail}{RESET}",
+            "{CLEAR_LINE}{:<9} {GRAY}{glyph}{detail}{RESET}",
             self.label
         );
         let _ = out.flush();
