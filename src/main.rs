@@ -112,6 +112,10 @@ async fn main() -> Result<()> {
     // Restored when this guard drops, which covers normal exit and errors; Ctrl-C bypasses
     // drop, so a signal handler restores it explicitly before exiting.
     let _cursor = HiddenCursor::new();
+    // Drawn before building the HTTP client or any networking, so output appears the moment
+    // the CLI starts.
+    let mut spinner = Spinner::new("Server");
+    spinner.tick(LOCATING);
     tokio::spawn(async {
         if tokio::signal::ctrl_c().await.is_ok() {
             if std::io::stdout().is_terminal() {
@@ -133,7 +137,7 @@ async fn main() -> Result<()> {
         .build()
         .context("building HTTP client")?;
 
-    let backend = run_locate(&client, args.cloudflare).await?;
+    let backend = run_locate(spinner, &client, args.cloudflare).await?;
 
     let duration = backend.max_duration(Duration::from_secs(args.duration));
     // Download streams are torn down at the deadline; every byte counted has arrived.
@@ -152,10 +156,14 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+const LOCATING: &str = "locating nearest server";
+
 /// Finds the server behind a spinner, then prints where it is.
-async fn run_locate(client: &Client, use_cloudflare: bool) -> Result<Backend> {
-    let mut spinner = Spinner::new("Server");
-    spinner.tick("locating nearest server");
+async fn run_locate(
+    mut spinner: Spinner,
+    client: &Client,
+    use_cloudflare: bool,
+) -> Result<Backend> {
     let mut task = tokio::spawn({
         let client = client.clone();
         async move { Backend::locate(&client, use_cloudflare).await }
@@ -163,7 +171,7 @@ async fn run_locate(client: &Client, use_cloudflare: bool) -> Result<Backend> {
     let mut tick = tokio::time::interval(Duration::from_millis(80));
     let backend = loop {
         tokio::select! {
-            _ = tick.tick() => spinner.tick("locating nearest server"),
+            _ = tick.tick() => spinner.tick(LOCATING),
             res = &mut task => break res?,
         }
     };
