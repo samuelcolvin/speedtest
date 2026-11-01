@@ -1,8 +1,8 @@
 //! Latency and throughput measurement against Cloudflare's public speed-test endpoints.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -20,36 +20,29 @@ const DOWN_CHUNK: u64 = 25_000_000;
 const UP_REQUEST_MAX: u64 = 25_000_000;
 const UP_CHUNK: usize = 64 * 1024;
 
-/// Cloudflare's own speed test runs in the browser, so present the same kind of client it
-/// expects; a bespoke user agent is more likely to be rate-limited or blocked.
-const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
-                          (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
+/// Zero-byte download used for latency round trips.
+pub const PING_URL: &str = "https://speed.cloudflare.com/__down?bytes=0";
 
-pub fn client() -> Result<Client> {
-    Client::builder()
-        .user_agent(USER_AGENT)
-        .timeout(Duration::from_secs(60))
-        .build()
-        .context("building HTTP client")
+/// The Cloudflare point of presence serving us, identified by the airport code in `CF-RAY`.
+pub struct Server {
+    pub colo: String,
 }
 
-/// One warm-up request (discarded) then `count` timed zero-byte GETs on the reused connection.
-/// `done` is incremented after each sample so a caller can show progress.
-pub async fn ping(client: Client, count: usize, done: Arc<AtomicUsize>) -> Result<Vec<Duration>> {
-    let probe = || client.get(DOWN_URL).query(&[("bytes", "0")]).send();
-    probe()
+pub async fn locate(client: &Client) -> Result<Server> {
+    let resp = client
+        .get(PING_URL)
+        .send()
         .await
-        .context("warm-up request to speed.cloudflare.com")?;
-
-    let mut samples = Vec::with_capacity(count);
-    for _ in 0..count {
-        let start = Instant::now();
-        let resp = probe().await.context("ping request")?;
-        resp.bytes().await.context("ping response body")?;
-        samples.push(start.elapsed());
-        done.fetch_add(1, Ordering::Relaxed);
-    }
-    Ok(samples)
+        .context("contacting speed.cloudflare.com")?
+        .error_for_status()
+        .context("speed.cloudflare.com response")?;
+    let colo = resp
+        .headers()
+        .get("cf-ray")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|ray| ray.rsplit_once('-'))
+        .map_or_else(|| "unknown".to_owned(), |(_, colo)| colo.to_owned());
+    Ok(Server { colo })
 }
 
 /// Spawns `connections` download loops that run until `deadline`, adding received bytes to `counter`.
@@ -137,18 +130,4 @@ pub fn upload(
         });
     }
     set
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn user_agent_is_a_single_line_browser_string() {
-        let ua = super::USER_AGENT;
-        assert!(ua.starts_with("Mozilla/5.0 ("), "{ua}");
-        assert!(
-            ua.contains("AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"),
-            "{ua}"
-        );
-        assert!(!ua.contains('\n') && !ua.contains("  "), "{ua}");
-    }
 }
