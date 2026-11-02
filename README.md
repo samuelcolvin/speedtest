@@ -12,6 +12,8 @@ Ping      min 12.3 ms   mean 14.1 ms   max 19.8 ms   (10 samples)
 In a terminal, every bar cell is the same `▰` glyph, white for the lit part and gray for the rest.
 The bar redraws in place while the phase runs and stays at the overall average when it ends.
 The scale starts at 0–10 Mbps and grows to the next of 20, 50, 100, 200, 500, 1000 and so on as the speed exceeds it.
+Download and upload share one scale: upload starts on the scale download ended on, and if upload outgrows it, the
+download bar is redrawn on the larger scale.
 When stdout is not a terminal, only the finished lines are printed.
 
 ## Install
@@ -57,11 +59,12 @@ That is why M-Lab is the default.
 It is not ICMP, so it needs no privileges.
 If the first five samples take more than four seconds in total, sampling stops at five.
 
-The live bar shows throughput over the last second.
-The final figure is total bytes over the whole phase.
-For upload the count is bytes accepted by the socket, which can run slightly ahead of what has reached the server on
-slow links.
-At the deadline the upload waits for the server to finish the exchange before the average is taken.
+The bar shows the average speed since the first byte arrived, the same figure M-Lab's own NDT7 clients show.
+Connection setup is excluded, which matters on high-latency links where opening a connection can take seconds.
+The figure settles as the phase runs and ends on the final result, so the bar does not jump when it stops.
+For upload the count is bytes accepted by the socket.
+The socket buffer fills quickly at the start, so early upload readings run high and fall as the test goes on.
+At the deadline the upload waits for the server to finish the exchange, and the bar keeps updating while it does.
 
 ## Development
 

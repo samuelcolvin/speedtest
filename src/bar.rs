@@ -12,6 +12,7 @@ const LIT: &str = "\x1b[97m";
 const GRAY: &str = "\x1b[90m";
 const RESET: &str = "\x1b[0m";
 const CLEAR_LINE: &str = "\r\x1b[2K";
+const CURSOR_UP: &str = "\x1b[1A";
 const HIDE_CURSOR: &str = "\x1b[?25l";
 pub const SHOW_CURSOR: &str = "\x1b[?25h";
 
@@ -26,43 +27,84 @@ fn stdout_is_tty() -> bool {
     std::io::stdout().is_terminal()
 }
 
+/// Redraws the current line with `text` and leaves a blank line below it, returning the cursor
+/// to the start of the redrawn line so the next redraw replaces it.
+fn draw_live(out: &mut impl std::io::Write, text: &str) {
+    let _ = write!(out, "{CLEAR_LINE}{text}\n{CLEAR_LINE}{CURSOR_UP}");
+}
+
+/// Draws the final version of the current line and moves to the blank line below it.
+fn draw_final(out: &mut impl std::io::Write, tty: bool, text: &str) {
+    if tty {
+        let _ = write!(out, "{CLEAR_LINE}");
+    }
+    let _ = writeln!(out, "{text}");
+}
+
+/// A bar that has stopped updating. A bar drawn directly below it shares its scale, and
+/// redraws it if that scale has to grow.
+pub struct Finished {
+    label: &'static str,
+    mbps: f64,
+    max_mbps: u64,
+}
+
 pub struct SpeedBar {
     label: &'static str,
     max_mbps: u64,
     tty: bool,
+    above: Option<Finished>,
 }
 
 impl SpeedBar {
-    pub fn new(label: &'static str) -> Self {
+    /// A new bar. With `above`, the bar starts on that bar's scale and keeps the two in step.
+    pub fn new(label: &'static str, above: Option<Finished>) -> Self {
         Self {
             label,
-            max_mbps: SCALES[0],
+            max_mbps: above.as_ref().map_or(SCALES[0], |a| a.max_mbps),
             tty: stdout_is_tty(),
+            above,
         }
     }
 
     /// Redraw the bar in place with the current speed. No-op when stdout is not a terminal.
     pub fn update(&mut self, mbps: f64) {
-        self.grow(mbps);
+        let grew = self.grow(mbps);
         if self.tty {
             let mut out = std::io::stdout().lock();
-            let _ = write!(out, "{CLEAR_LINE}{}", self.render(mbps));
+            self.redraw_above(&mut out, grew);
+            draw_live(&mut out, &self.render(mbps));
             let _ = out.flush();
         }
     }
 
     /// Draw the final value and move to the next line.
-    pub fn finish(&mut self, mbps: f64) {
-        self.grow(mbps);
+    pub fn finish(mut self, mbps: f64) -> Finished {
+        let grew = self.grow(mbps);
         let mut out = std::io::stdout().lock();
         if self.tty {
-            let _ = write!(out, "{CLEAR_LINE}");
+            self.redraw_above(&mut out, grew);
         }
-        let _ = writeln!(out, "{}", self.render(mbps));
+        draw_final(&mut out, self.tty, &self.render(mbps));
         let _ = out.flush();
+        Finished {
+            label: self.label,
+            mbps,
+            max_mbps: self.max_mbps,
+        }
     }
 
-    fn grow(&mut self, mbps: f64) {
+    /// Redraw the finished bar on the line above when the shared scale has grown.
+    fn redraw_above(&self, out: &mut impl std::io::Write, grew: bool) {
+        if let (true, Some(above)) = (grew, &self.above) {
+            let line = render(above.label, above.mbps, self.max_mbps, self.tty);
+            let _ = writeln!(out, "{CURSOR_UP}{CLEAR_LINE}{line}");
+        }
+    }
+
+    /// Grow the scale to fit `mbps`, returning whether it changed.
+    fn grow(&mut self, mbps: f64) -> bool {
+        let before = self.max_mbps;
         let fits = |m: u64| mbps <= m as f64;
         if let Some(&max) = SCALES.iter().find(|&&m| m >= self.max_mbps && fits(m)) {
             self.max_mbps = max;
@@ -73,24 +115,29 @@ impl SpeedBar {
                 self.max_mbps *= 2;
             }
         }
+        self.max_mbps != before
     }
 
     fn render(&self, mbps: f64) -> String {
-        let lit = lit_cells(mbps / self.max_mbps as f64);
-        let mut s = format!("{:<9} ", self.label);
-        if self.tty {
-            s.push_str(LIT);
-            s.push_str(&CELL.repeat(lit));
-            s.push_str(GRAY);
-            s.push_str(&CELL.repeat(WIDTH - lit));
-            s.push_str(RESET);
-        } else {
-            s.push_str(&CELL.repeat(lit));
-            s.push_str(&"▱".repeat(WIDTH - lit));
-        }
-        let _ = write!(s, "  {:>7} Mbps  (0–{})", format_mbps(mbps), self.max_mbps);
-        s
+        render(self.label, mbps, self.max_mbps, self.tty)
     }
+}
+
+fn render(label: &str, mbps: f64, max_mbps: u64, tty: bool) -> String {
+    let lit = lit_cells(mbps / max_mbps as f64);
+    let mut s = format!("{label:<9} ");
+    if tty {
+        s.push_str(LIT);
+        s.push_str(&CELL.repeat(lit));
+        s.push_str(GRAY);
+        s.push_str(&CELL.repeat(WIDTH - lit));
+        s.push_str(RESET);
+    } else {
+        s.push_str(&CELL.repeat(lit));
+        s.push_str(&"▱".repeat(WIDTH - lit));
+    }
+    let _ = write!(s, "  {:>7} Mbps  (0–{max_mbps})", format_mbps(mbps));
+    s
 }
 
 /// More decimals as the speed drops, so slow links still show a meaningful figure:
@@ -135,8 +182,10 @@ impl HiddenCursor {
 impl Drop for HiddenCursor {
     fn drop(&mut self) {
         if self.tty {
+            // The cursor is on the blank line below the output; step past it so the blank
+            // line stays between the output and whatever comes next.
             let mut out = std::io::stdout().lock();
-            let _ = write!(out, "{SHOW_CURSOR}");
+            let _ = write!(out, "\n{SHOW_CURSOR}");
             let _ = out.flush();
         }
     }
@@ -158,7 +207,7 @@ impl LiveLine {
     pub fn update(&self, text: &str) {
         if self.tty {
             let mut out = std::io::stdout().lock();
-            let _ = write!(out, "{CLEAR_LINE}{text}");
+            draw_live(&mut out, text);
             let _ = out.flush();
         }
     }
@@ -166,10 +215,7 @@ impl LiveLine {
     /// Replace the current line for the last time and move to the next.
     pub fn finish(&self, text: &str) {
         let mut out = std::io::stdout().lock();
-        if self.tty {
-            let _ = write!(out, "{CLEAR_LINE}");
-        }
-        let _ = writeln!(out, "{text}");
+        draw_final(&mut out, self.tty, text);
         let _ = out.flush();
     }
 }
@@ -203,10 +249,9 @@ impl Spinner {
             format!(" {detail}")
         };
         let mut out = std::io::stdout().lock();
-        let _ = write!(
-            out,
-            "{CLEAR_LINE}{:<9} {GRAY}{glyph}{detail}{RESET}",
-            self.label
+        draw_live(
+            &mut out,
+            &format!("{:<9} {GRAY}{glyph}{detail}{RESET}", self.label),
         );
         let _ = out.flush();
     }
@@ -230,6 +275,7 @@ mod tests {
             label: "x",
             max_mbps: SCALES[0],
             tty: false,
+            above: None,
         }
     }
 
@@ -246,6 +292,18 @@ mod tests {
         assert_eq!(b.max_mbps, 200);
         b.grow(950.0);
         assert_eq!(b.max_mbps, 1000);
+    }
+
+    #[test]
+    fn bar_below_starts_on_the_finished_scale() {
+        let mut download = bar();
+        download.grow(150.0);
+        let finished = download.finish(150.0);
+        let mut upload = SpeedBar::new("Upload", Some(finished));
+        assert_eq!(upload.max_mbps, 200);
+        assert!(!upload.grow(20.0));
+        assert!(upload.grow(300.0));
+        assert_eq!(upload.max_mbps, 500);
     }
 
     #[test]

@@ -13,7 +13,7 @@ use clap::Parser;
 use reqwest::Client;
 use tokio::task::JoinSet;
 
-use bar::{HiddenCursor, LiveLine, SpeedBar, Spinner};
+use bar::{Finished, HiddenCursor, LiveLine, SpeedBar, Spinner};
 
 /// Measure ping, download and upload speed.
 #[derive(Parser, Debug)]
@@ -119,7 +119,8 @@ async fn main() -> Result<()> {
     tokio::spawn(async {
         if tokio::signal::ctrl_c().await.is_ok() {
             if std::io::stdout().is_terminal() {
-                print!("{}", bar::SHOW_CURSOR);
+                // The cursor is at the start of a live line: step past it and the blank line below.
+                print!("\n\n{}", bar::SHOW_CURSOR);
                 let _ = std::io::stdout().flush();
             }
             std::process::exit(130);
@@ -141,15 +142,19 @@ async fn main() -> Result<()> {
 
     let duration = backend.max_duration(Duration::from_secs(args.duration));
     // Download streams are torn down at the deadline; every byte counted has arrived.
-    run_phase("Download", duration, false, |deadline, counter| {
+    let download = run_phase("Download", None, duration, false, |deadline, counter| {
         backend.download(&client, args.connections, deadline, counter)
     })
     .await?;
     // Upload stops sending at the deadline, then waits for the server to finish the exchange
     // so the average reflects what was accepted rather than what was queued locally.
-    run_phase("Upload", duration, true, |deadline, counter| {
-        backend.upload(&client, args.connections, deadline, counter)
-    })
+    run_phase(
+        "Upload",
+        Some(download),
+        duration,
+        true,
+        |deadline, counter| backend.upload(&client, args.connections, deadline, counter),
+    )
     .await?;
 
     run_ping(&client, backend.ping_url(), args.pings).await?;
@@ -260,11 +265,17 @@ async fn run_ping(client: &Client, url: String, count: usize) -> Result<()> {
     result
 }
 
-/// Runs a throughput phase: spawns the workers, drives the live bar with a 1 s sliding-window
-/// speed until the deadline or until the workers finish (an NDT7 server ends the test itself),
-/// then freezes the bar at the overall average. With `drain` the workers may finish their
-/// final exchange (bounded) before the average is taken.
-async fn run_phase<F>(label: &'static str, duration: Duration, drain: bool, spawn: F) -> Result<()>
+/// Runs a throughput phase: spawns the workers and drives the live bar with the average speed
+/// so far until the deadline or until the workers finish (an NDT7 server ends the test itself).
+/// The bar ends on the same average, so it doesn't jump when the phase finishes. With `drain`
+/// the workers may finish their final exchange (bounded) before the average is taken.
+async fn run_phase<F>(
+    label: &'static str,
+    above: Option<Finished>,
+    duration: Duration,
+    drain: bool,
+    spawn: F,
+) -> Result<Finished>
 where
     F: FnOnce(Instant, &Arc<AtomicU64>) -> JoinSet<Result<()>>,
 {
@@ -272,24 +283,22 @@ where
     let start = Instant::now();
     let deadline = start + duration;
     let mut set = spawn(deadline, &counter);
-    let mut bar = SpeedBar::new(label);
+    let mut bar = SpeedBar::new(label, above);
     bar.update(0.0);
 
-    // (instant, cumulative bytes) samples for the sliding window.
-    let mut history: Vec<(Instant, u64)> = vec![(start, 0)];
+    // The average is timed from the first byte, so connection setup (several seconds on a
+    // high-latency link) doesn't count as time spent transferring.
+    let mut first_byte: Option<Instant> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     loop {
         tokio::select! {
             _ = tick.tick() => {
                 let now = Instant::now();
                 let total = counter.load(Ordering::Relaxed);
-                history.push((now, total));
-                history.retain(|(t, _)| now.duration_since(*t) <= Duration::from_secs(1));
-                let (t0, b0) = history[0];
-                let window = now.duration_since(t0).as_secs_f64();
-                if window > 0.0 {
-                    bar.update(mbps(total - b0, window));
+                if first_byte.is_none() && total > 0 {
+                    first_byte = Some(now);
                 }
+                bar.update(average_mbps(total, first_byte, now));
                 if now >= deadline {
                     break;
                 }
@@ -303,24 +312,53 @@ where
         }
     }
     if drain {
-        let _ = tokio::time::timeout(Duration::from_secs(10), async {
-            while set.join_next().await.is_some() {}
-        })
-        .await;
+        // Keep redrawing while the last exchange finishes: the average falls as time passes
+        // without new bytes, and showing that avoids a jump when the bar is frozen.
+        let drain_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    let now = Instant::now();
+                    bar.update(average_mbps(counter.load(Ordering::Relaxed), first_byte, now));
+                    if now >= drain_deadline {
+                        break;
+                    }
+                }
+                res = set.join_next() => if res.is_none() { break },
+            }
+        }
     }
     set.abort_all();
-    let elapsed = start.elapsed().as_secs_f64();
-    bar.finish(mbps(counter.load(Ordering::Relaxed), elapsed));
-    Ok(())
+    Ok(bar.finish(average_mbps(
+        counter.load(Ordering::Relaxed),
+        first_byte,
+        Instant::now(),
+    )))
 }
 
-fn mbps(bytes: u64, secs: f64) -> f64 {
-    bytes as f64 * 8.0 / secs / 1_000_000.0
+/// Average speed in Mbps over the time since the first byte; zero until there is one.
+fn average_mbps(bytes: u64, first_byte: Option<Instant>, now: Instant) -> f64 {
+    let secs = first_byte.map_or(0.0, |t| now.duration_since(t).as_secs_f64());
+    if secs > 0.0 {
+        bytes as f64 * 8.0 / secs / 1_000_000.0
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn average_is_timed_from_first_byte() {
+        let t0 = Instant::now();
+        assert_eq!(average_mbps(0, None, t0), 0.0);
+        assert_eq!(average_mbps(1_000, Some(t0), t0), 0.0);
+        // 2.5 MB over 2 s is 10 Mbps
+        let mbps = average_mbps(2_500_000, Some(t0), t0 + Duration::from_secs(2));
+        assert!((mbps - 10.0).abs() < 1e-9, "{mbps}");
+    }
 
     #[test]
     fn ping_line_counts_samples() {
